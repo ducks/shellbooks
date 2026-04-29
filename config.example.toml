@@ -1,0 +1,21 @@
+# Shellbooks configuration. Copy to ~/.config/shellbooks/config.toml.
+
+# One or more directories that contain audiobook directories or single-file books.
+# A "book" is either a directory of audio files (chapter per file) or a single
+# .m4b file. Cover art is loaded from cover.jpg/cover.png in the book dir if
+# present, falling back to embedded tags.
+library_paths = [
+  "~/Audiobooks",
+]
+
+# Default playback speed (1.0 = normal). Pitch-preserved via tdpsola.
+default_speed = 1.0
+
+# Sleep timer default in minutes (0 = disabled at startup).
+sleep_timer_minutes = 0
+
+# UI theme. One of: gruvbox, monokai, solarized, default.
+theme = "gruvbox"
+
+# Auto-mark a book as finished when within this many seconds of the end.
+finish_threshold_seconds = 30

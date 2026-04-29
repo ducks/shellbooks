@@ -1,0 +1,44 @@
+[package]
+name = "shellbooks"
+version = "20260429.0.0"
+edition = "2024"
+authors = ["Jake Goldsborough <github@pancakes.email>"]
+description = "A terminal audiobook player and library manager with chapters, series, and pitch-preserving variable speed"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ducks/shellbooks"
+homepage = "https://github.com/ducks/shellbooks"
+readme = "README.md"
+keywords = ["audiobook", "audio", "tui", "terminal", "player"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[dependencies]
+# TUI
+crossterm = "0.29"
+ratatui = { version = "0.29", features = ["crossterm"] }
+ratatui-image = "8"
+
+# Audio
+rodio = { version = "0.21", features = ["symphonia-all"] }
+tdpsola = "0.1"
+
+# Library scan + metadata
+walkdir = "2.5"
+id3 = "1.14"           # mp3 tags
+mp4ameta = "0.13"      # m4b tags + chapters
+image = "0.25"         # cover art decoding for ratatui-image
+
+# Persistence + config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "6"
+
+# Util
+anyhow = "1"
+log = "0.4"
+simplelog = "0.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
