@@ -10,10 +10,11 @@ use crate::app::{App, View};
 
 mod book_detail;
 mod bookmarks;
+mod browser_view;
 mod library_view;
 mod now_playing;
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -27,6 +28,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     match app.view {
         View::Library => library_view::draw(f, chunks[1], app),
+        View::Browser => browser_view::draw(f, chunks[1], app),
         View::BookDetail => book_detail::draw(f, chunks[1], app),
         View::NowPlaying => now_playing::draw(f, chunks[1], app),
         View::Bookmarks => bookmarks::draw(f, chunks[1], app),
@@ -38,6 +40,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn draw_tabs(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let tabs = [
         ("library", View::Library),
+        ("browser", View::Browser),
         ("book", View::BookDetail),
         ("now playing", View::NowPlaying),
         ("bookmarks", View::Bookmarks),
@@ -64,15 +67,31 @@ fn draw_status(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         crate::audio::PlayerState::Paused => "⏸",
         crate::audio::PlayerState::Idle => "·",
     };
-    let line = Line::from(vec![
+
+    let help = match app.view {
+        View::Library => "q quit · a add · j/k move · tab view",
+        View::Browser => "q quit · enter open/import · h up · esc back · tab view",
+        _ => "q quit · space play/pause · +/- speed · tab view",
+    };
+
+    let mut spans = vec![
         Span::raw("  "),
         Span::styled(state, Style::default().fg(Color::Yellow)),
         Span::raw("  speed "),
         Span::styled(speed, Style::default().fg(Color::Cyan)),
-        Span::raw("    q quit · space play/pause · +/- speed · tab view"),
-    ]);
+        Span::raw("    "),
+    ];
+    if let Some(msg) = &app.status {
+        spans.push(Span::styled(
+            msg.clone(),
+            Style::default().fg(Color::Green),
+        ));
+    } else {
+        spans.push(Span::raw(help));
+    }
+
     f.render_widget(
-        Paragraph::new(line).block(Block::default().borders(Borders::TOP)),
+        Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::TOP)),
         area,
     );
 }

@@ -23,6 +23,7 @@ tdpsola = "0.1"
 
 # Library scan + metadata
 walkdir = "2.5"
+sha2 = "0.10"
 id3 = "1.14"           # mp3 tags
 mp4ameta = "0.13"      # m4b tags + chapters
 image = "0.25"         # cover art decoding for ratatui-image
