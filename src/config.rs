@@ -49,3 +49,24 @@ pub fn load() -> Result<Config> {
 fn config_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("shellbooks").join("config.toml"))
 }
+
+/// Where library.json lives. ~/.local/share/shellbooks/library.json on Linux.
+pub fn library_db_path() -> Option<PathBuf> {
+    Some(dirs::data_dir()?.join("shellbooks").join("library.json"))
+}
+
+/// Expand a leading `~` against $HOME. Used so users can write `~/Audiobooks`
+/// in their config without the rest of the app seeing a literal tilde.
+pub fn expand_tilde(p: &std::path::Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    } else if s == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
+    p.to_path_buf()
+}

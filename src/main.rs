@@ -2,9 +2,11 @@ use anyhow::Result;
 
 mod app;
 mod audio;
+mod browser;
 mod chapters;
 mod config;
 mod library;
+mod list;
 mod metadata;
 mod ui;
 

@@ -6,7 +6,7 @@ use ratatui::{
 
 use crate::app::App;
 
-pub fn draw(f: &mut Frame, area: Rect, _app: &App) {
+pub fn draw(f: &mut Frame, area: Rect, _app: &mut App) {
     f.render_widget(
         Paragraph::new("now playing (TODO: progress bar, chapter title, sleep timer)")
             .block(Block::default().borders(Borders::ALL).title("Now Playing")),

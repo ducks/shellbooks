@@ -7,7 +7,7 @@ use ratatui::{
 
 use crate::app::App;
 
-pub fn draw(f: &mut Frame, area: Rect, app: &App) {
+pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let items: Vec<ListItem> = if app.library.books.is_empty() {
         vec![ListItem::new(
             "no books yet — add a path to ~/.config/shellbooks/config.toml",
