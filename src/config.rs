@@ -70,3 +70,41 @@ pub fn expand_tilde(p: &std::path::Path) -> PathBuf {
     }
     p.to_path_buf()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn expand_tilde_leaves_non_tilde_paths_alone() {
+        assert_eq!(expand_tilde(Path::new("/etc/hosts")), PathBuf::from("/etc/hosts"));
+        assert_eq!(expand_tilde(Path::new("relative/path")), PathBuf::from("relative/path"));
+        // A tilde mid-path is not expanded; only a leading `~` or `~/`.
+        assert_eq!(
+            expand_tilde(Path::new("/foo/~/bar")),
+            PathBuf::from("/foo/~/bar")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_replaces_leading_tilde_slash() {
+        let Some(home) = dirs::home_dir() else { return };
+        assert_eq!(expand_tilde(Path::new("~/Audiobooks")), home.join("Audiobooks"));
+    }
+
+    #[test]
+    fn expand_tilde_replaces_bare_tilde() {
+        let Some(home) = dirs::home_dir() else { return };
+        assert_eq!(expand_tilde(Path::new("~")), home);
+    }
+
+    #[test]
+    fn config_defaults_are_usable() {
+        let cfg = Config::default();
+        assert!(cfg.library_paths.is_empty());
+        assert_eq!(cfg.default_speed, 1.0);
+        assert_eq!(cfg.theme, "gruvbox");
+        assert_eq!(cfg.finish_threshold_seconds, 30);
+    }
+}
