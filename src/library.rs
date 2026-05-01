@@ -130,7 +130,7 @@ impl Library {
     /// book). Returns the index of the imported book in `self.books`,
     /// or the existing index if it was already in the library.
     pub fn import_path(&mut self, path: &Path) -> Result<usize> {
-        let book = if path.is_dir() {
+        let mut book = if path.is_dir() {
             let mut files: Vec<PathBuf> = std::fs::read_dir(path)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| p.is_file() && is_audio_file(p))
@@ -154,9 +154,20 @@ impl Library {
             return Ok(idx);
         }
 
+        // Pull tags from the first audio file. Best-effort: a malformed
+        // file shouldn't block the import, just leave fields empty.
+        if let Some(first) = first_audio_file(&book.kind) {
+            match crate::metadata::read(&first) {
+                Ok(tags) => {
+                    crate::metadata::apply_to_book(&mut book, &tags);
+                    book.cover_path = resolve_cover(&book.id, &book.root, &tags);
+                }
+                Err(e) => log::warn!("could not read tags from {}: {e}", first.display()),
+            }
+        }
+
         self.books.push(book);
         self.books.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-        // Index of the now-sorted-in book.
         let new_idx = self
             .books
             .iter()
@@ -242,6 +253,57 @@ fn collect_books_under(root: &Path, out: &mut Vec<Book>) {
         files.sort();
         let book = build_book(&parent, files);
         out.push(book);
+    }
+}
+
+/// First audio file in the book, used to source tag data on import.
+fn first_audio_file(kind: &BookKind) -> Option<PathBuf> {
+    match kind {
+        BookKind::SingleFile { path } => Some(path.clone()),
+        BookKind::MultiFile { files } => files.first().cloned(),
+    }
+}
+
+/// Resolve a stable on-disk path to the book's cover art.
+/// Order of preference:
+///   1. Sidecar file in the book's directory (cover.jpg / cover.png / ...)
+///   2. Embedded artwork from the audio file's tags, written to the cache
+///      directory at ~/.cache/shellbooks/covers/<book_id>.<ext>
+/// Returns None if neither is available.
+fn resolve_cover(
+    book_id: &str,
+    book_root: &Path,
+    tags: &crate::metadata::Tags,
+) -> Option<PathBuf> {
+    if let Some(side) = crate::metadata::sidecar_cover(book_root) {
+        return Some(side);
+    }
+    let bytes = tags.embedded_cover.as_ref()?;
+    write_cover_to_cache(book_id, bytes).ok()
+}
+
+/// Write cover bytes to ~/.cache/shellbooks/covers/<book_id>.<ext>.
+/// Sniffs jpeg/png from magic bytes; falls back to .bin which we'll
+/// just skip rendering rather than misidentify.
+fn write_cover_to_cache(book_id: &str, bytes: &[u8]) -> Result<PathBuf> {
+    let ext = sniff_image_ext(bytes).unwrap_or("bin");
+    let cache_dir = dirs::cache_dir()
+        .ok_or_else(|| anyhow::anyhow!("no cache dir"))?
+        .join("shellbooks")
+        .join("covers");
+    std::fs::create_dir_all(&cache_dir)?;
+    let path = cache_dir.join(format!("{book_id}.{ext}"));
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+fn sniff_image_ext(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("png")
+    } else {
+        None
     }
 }
 
@@ -532,6 +594,67 @@ mod tests {
         assert_eq!(loaded.books.len(), 2);
         assert_eq!(loaded.books[0].id, "aabbccddeeff0011");
         assert_eq!(loaded.books[1].title, "Second");
+    }
+
+    // ---- cover sniffing + cache writes ----
+
+    #[test]
+    fn sniff_image_ext_detects_jpeg() {
+        assert_eq!(sniff_image_ext(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpg"));
+    }
+
+    #[test]
+    fn sniff_image_ext_detects_png() {
+        assert_eq!(sniff_image_ext(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A]), Some("png"));
+    }
+
+    #[test]
+    fn sniff_image_ext_returns_none_for_unknown() {
+        assert_eq!(sniff_image_ext(b"just some random bytes"), None);
+        assert_eq!(sniff_image_ext(&[]), None);
+    }
+
+    // ---- first_audio_file dispatch ----
+
+    #[test]
+    fn first_audio_file_returns_path_for_single() {
+        let kind = BookKind::SingleFile { path: PathBuf::from("/tmp/x/book.m4b") };
+        assert_eq!(first_audio_file(&kind), Some(PathBuf::from("/tmp/x/book.m4b")));
+    }
+
+    #[test]
+    fn first_audio_file_returns_first_for_multi() {
+        let kind = BookKind::MultiFile {
+            files: vec![PathBuf::from("/tmp/01.mp3"), PathBuf::from("/tmp/02.mp3")],
+        };
+        assert_eq!(first_audio_file(&kind), Some(PathBuf::from("/tmp/01.mp3")));
+    }
+
+    #[test]
+    fn first_audio_file_returns_none_for_empty_multi() {
+        let kind = BookKind::MultiFile { files: vec![] };
+        assert_eq!(first_audio_file(&kind), None);
+    }
+
+    // ---- resolve_cover prefers sidecar ----
+
+    #[test]
+    fn resolve_cover_prefers_sidecar_over_embedded() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("cover.jpg"), b"fake jpg").unwrap();
+        let tags = crate::metadata::Tags {
+            embedded_cover: Some(vec![0xFF, 0xD8, 0xFF, 0xE0]),
+            ..Default::default()
+        };
+        let result = resolve_cover("test_id_1", dir.path(), &tags);
+        assert_eq!(result.unwrap().file_name().unwrap(), "cover.jpg");
+    }
+
+    #[test]
+    fn resolve_cover_returns_none_when_neither_present() {
+        let dir = TempDir::new().unwrap();
+        let tags = crate::metadata::Tags::default();
+        assert!(resolve_cover("test_id_2", dir.path(), &tags).is_none());
     }
 
     #[test]
