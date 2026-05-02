@@ -16,10 +16,15 @@ use crate::library::{BookKind, Library};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Library,
-    Browser,
-    BookDetail,
-    NowPlaying,
     Bookmarks,
+    Browser,
+}
+
+/// Which sub-pane has focus inside the Library two-pane layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryFocus {
+    Books,
+    Chapters,
 }
 
 pub struct App {
@@ -29,7 +34,10 @@ pub struct App {
     pub view: View,
     pub selected_book: usize,
     pub selected_chapter: usize,
+    pub library_focus: LibraryFocus,
     pub browser: BrowserState,
+    /// True when the `i` info modal is overlaid on the current view.
+    pub show_info: bool,
     pub should_quit: bool,
     pub status: Option<String>,
 }
@@ -45,7 +53,9 @@ impl App {
             view: View::Library,
             selected_book: 0,
             selected_chapter: 0,
+            library_focus: LibraryFocus::Books,
             browser: BrowserState::new(),
+            show_info: false,
             should_quit: false,
             status: None,
         })
@@ -63,7 +73,7 @@ impl App {
 
     /// Start playing the currently-selected library book from its saved
     /// progress. Quietly does nothing if no books are loaded.
-    fn play_selected(&mut self) {
+    fn play_selected_book(&mut self) {
         let Some(book) = self.library.books.get(self.selected_book) else {
             return;
         };
@@ -82,13 +92,69 @@ impl App {
 
         match self.player.play(queue, queue_index, resume_offset) {
             Ok(()) => {
-                self.view = View::NowPlaying;
                 self.status = Some(format!("playing: {}", book.title));
             }
             Err(err) => {
                 self.status = Some(format!("playback failed: {err}"));
             }
         }
+    }
+
+    /// Start playing the selected book at the selected chapter.
+    fn play_selected_chapter(&mut self) {
+        let Some(book) = self.library.books.get(self.selected_book) else {
+            return;
+        };
+        let Some(chapter) = book.chapters.get(self.selected_chapter) else {
+            return;
+        };
+        let queue: Vec<std::path::PathBuf> = match &book.kind {
+            BookKind::SingleFile { path } => vec![path.clone()],
+            BookKind::MultiFile { files } => files.clone(),
+        };
+        match self.player.play(queue, chapter.file_index, chapter.start) {
+            Ok(()) => {
+                self.status = Some(format!("playing: {} — {}", book.title, chapter.title));
+            }
+            Err(err) => {
+                self.status = Some(format!("playback failed: {err}"));
+            }
+        }
+    }
+
+    /// Remove the highlighted book from the library and persist. If the
+    /// removed book was actively playing, stop the player so we don't
+    /// keep spinning on a queue whose entries no longer have a backing
+    /// catalog entry.
+    fn delete_selected_book(&mut self) {
+        let Some(removed) = self.library.delete_at(self.selected_book) else {
+            return;
+        };
+
+        // If the removed book was playing, stop. We compare by checking
+        // whether any of its files matches the player's queue.
+        let removed_paths: Vec<&std::path::Path> = match &removed.kind {
+            crate::library::BookKind::SingleFile { path } => vec![path.as_path()],
+            crate::library::BookKind::MultiFile { files } => {
+                files.iter().map(|p| p.as_path()).collect()
+            }
+        };
+        if self
+            .player
+            .queue
+            .iter()
+            .any(|q| removed_paths.iter().any(|p| *p == q.as_path()))
+        {
+            self.player.stop();
+        }
+
+        // Keep selected_book valid.
+        if self.selected_book >= self.library.books.len() && self.selected_book > 0 {
+            self.selected_book -= 1;
+        }
+        self.selected_chapter = 0;
+        self.status = Some(format!("removed: {}", removed.title));
+        self.save_library();
     }
 
     /// Import the path the browser is pointing at. Path may be a directory
@@ -180,27 +246,27 @@ impl App {
         // Clear any one-shot status line on the next keypress.
         self.status = None;
 
+        // The info modal swallows most keys: Esc / `i` / `q` close it.
+        if self.show_info {
+            match code {
+                KeyCode::Esc | KeyCode::Char('i') => self.show_info = false,
+                KeyCode::Char('q') => self.should_quit = true,
+                _ => {}
+            }
+            return;
+        }
+
         match code {
             // ---- Global ----
             KeyCode::Char('q') => self.should_quit = true,
 
             // Direct screen jumps (cmus-style, like shelltrax).
             KeyCode::Char('1') => self.view = View::Library,
-            KeyCode::Char('2') => self.view = View::BookDetail,
-            KeyCode::Char('3') => self.view = View::NowPlaying,
-            KeyCode::Char('4') => self.view = View::Bookmarks,
-            KeyCode::Char('5') => self.view = View::Browser,
+            KeyCode::Char('2') => self.view = View::Bookmarks,
+            KeyCode::Char('3') => self.view = View::Browser,
 
-            // Tab still cycles for users who prefer it.
-            KeyCode::Tab => {
-                self.view = match self.view {
-                    View::Library => View::BookDetail,
-                    View::BookDetail => View::NowPlaying,
-                    View::NowPlaying => View::Bookmarks,
-                    View::Bookmarks => View::Browser,
-                    View::Browser => View::Library,
-                };
-            }
+            // `i` opens the info modal — works in any view.
+            KeyCode::Char('i') => self.show_info = true,
 
             // Playback controls work regardless of view.
             KeyCode::Char(' ') | KeyCode::Char('c') => self.player.toggle_pause(),
@@ -224,23 +290,30 @@ impl App {
             }
 
             // ---- Library ----
+            KeyCode::Tab if self.view == View::Library => {
+                self.library_focus = match self.library_focus {
+                    LibraryFocus::Books => LibraryFocus::Chapters,
+                    LibraryFocus::Chapters => LibraryFocus::Books,
+                };
+            }
             KeyCode::Char('a') if self.view == View::Library => {
                 self.view = View::Browser;
             }
-            KeyCode::Enter if self.view == View::Library => {
-                self.play_selected();
+            KeyCode::Char('d')
+                if self.view == View::Library
+                    && self.library_focus == LibraryFocus::Books =>
+            {
+                self.delete_selected_book();
             }
+            KeyCode::Enter if self.view == View::Library => match self.library_focus {
+                LibraryFocus::Books => self.play_selected_book(),
+                LibraryFocus::Chapters => self.play_selected_chapter(),
+            },
             KeyCode::Char('j') | KeyCode::Down if self.view == View::Library => {
-                if !self.library.books.is_empty()
-                    && self.selected_book + 1 < self.library.books.len()
-                {
-                    self.selected_book += 1;
-                }
+                self.move_down_in_library();
             }
             KeyCode::Char('k') | KeyCode::Up if self.view == View::Library => {
-                if self.selected_book > 0 {
-                    self.selected_book -= 1;
-                }
+                self.move_up_in_library();
             }
 
             // ---- Browser ----
@@ -260,13 +333,9 @@ impl App {
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right
                 if self.view == View::Browser =>
             {
-                // Enter only descends (or returns an audio file path —
-                // future use). Never imports. Matches shelltrax.
+                // Enter only descends. Importing is `a`. Matches shelltrax.
                 let _ = self.browser.open_selected();
             }
-            // shelltrax-style import: `a` adds the highlighted path to
-            // the library. Works on any directory of audio or a single
-            // audio file.
             KeyCode::Char('a') if self.view == View::Browser => {
                 if let Some(path) = self.browser.selected_path() {
                     self.import_from_browser(path);
@@ -276,6 +345,46 @@ impl App {
                 self.view = View::Library;
             }
             _ => {}
+        }
+    }
+
+    fn move_down_in_library(&mut self) {
+        match self.library_focus {
+            LibraryFocus::Books => {
+                if !self.library.books.is_empty()
+                    && self.selected_book + 1 < self.library.books.len()
+                {
+                    self.selected_book += 1;
+                    self.selected_chapter = 0;
+                }
+            }
+            LibraryFocus::Chapters => {
+                let max = self
+                    .library
+                    .books
+                    .get(self.selected_book)
+                    .map(|b| b.chapters.len())
+                    .unwrap_or(0);
+                if max > 0 && self.selected_chapter + 1 < max {
+                    self.selected_chapter += 1;
+                }
+            }
+        }
+    }
+
+    fn move_up_in_library(&mut self) {
+        match self.library_focus {
+            LibraryFocus::Books => {
+                if self.selected_book > 0 {
+                    self.selected_book -= 1;
+                    self.selected_chapter = 0;
+                }
+            }
+            LibraryFocus::Chapters => {
+                if self.selected_chapter > 0 {
+                    self.selected_chapter -= 1;
+                }
+            }
         }
     }
 }

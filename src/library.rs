@@ -125,6 +125,16 @@ impl Library {
         Ok(())
     }
 
+    /// Remove the book at `index` and return it. Caller is responsible
+    /// for persisting the library afterwards.
+    pub fn delete_at(&mut self, index: usize) -> Option<Book> {
+        if index < self.books.len() {
+            Some(self.books.remove(index))
+        } else {
+            None
+        }
+    }
+
     /// Import a single book from `path`. `path` is either a directory of
     /// audio files (multi-file book) or a single audio file (single-file
     /// book). Returns the index of the imported book in `self.books`,
@@ -157,9 +167,10 @@ impl Library {
         // Pull tags from the first audio file. Best-effort: a malformed
         // file shouldn't block the import, just leave fields empty.
         if let Some(first) = first_audio_file(&book.kind) {
+            let multi_file = matches!(book.kind, BookKind::MultiFile { .. });
             match crate::metadata::read(&first) {
                 Ok(tags) => {
-                    crate::metadata::apply_to_book(&mut book, &tags);
+                    crate::metadata::apply_to_book(&mut book, &tags, multi_file);
                     book.cover_path = resolve_cover(&book.id, &book.root, &tags);
                 }
                 Err(e) => log::warn!("could not read tags from {}: {e}", first.display()),
@@ -709,6 +720,26 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let tags = crate::metadata::Tags::default();
         assert!(resolve_cover("test_id_2", dir.path(), &tags).is_none());
+    }
+
+    #[test]
+    fn delete_at_removes_and_returns_the_book() {
+        let mut lib = Library::default();
+        lib.books.push(make_book("a", "First", "/tmp/a"));
+        lib.books.push(make_book("b", "Second", "/tmp/b"));
+
+        let removed = lib.delete_at(0).unwrap();
+        assert_eq!(removed.title, "First");
+        assert_eq!(lib.books.len(), 1);
+        assert_eq!(lib.books[0].title, "Second");
+    }
+
+    #[test]
+    fn delete_at_returns_none_for_out_of_bounds() {
+        let mut lib = Library::default();
+        assert!(lib.delete_at(0).is_none());
+        lib.books.push(make_book("a", "First", "/tmp/a"));
+        assert!(lib.delete_at(5).is_none());
     }
 
     #[test]
