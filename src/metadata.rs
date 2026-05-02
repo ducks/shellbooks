@@ -127,13 +127,25 @@ pub fn sidecar_cover(book_root: &Path) -> Option<PathBuf> {
 }
 
 /// Apply tags to a book, preferring tag values over directory-derived defaults.
-/// Caller still resolves the cover_path via sidecar_cover or by writing
-/// embedded_cover bytes to the cache.
-pub fn apply_to_book(book: &mut crate::library::Book, tags: &Tags) {
-    if let Some(t) = &tags.title
+/// `multi_file` should be true for multi-file (chapter-per-file) books — in
+/// that case the per-file `title` tag is the *chapter* title, not the book
+/// title, so we draw the book title from `series` (album tag) instead and
+/// clear `series` (since it was being used for the book name, not a series).
+/// For single-file `.m4b` books, the file's title tag is the book title.
+pub fn apply_to_book(book: &mut crate::library::Book, tags: &Tags, multi_file: bool) {
+    let book_title = if multi_file {
+        // For multi-file books, the album tag conventionally holds the book.
+        // The per-track `title` is the chapter and shouldn't override the
+        // directory-derived book name.
+        tags.series.as_deref()
+    } else {
+        tags.title.as_deref()
+    };
+
+    if let Some(t) = book_title
         && !t.trim().is_empty()
     {
-        book.title = t.clone();
+        book.title = t.to_string();
     }
     if tags.author.is_some() {
         book.author = tags.author.clone();
@@ -141,7 +153,9 @@ pub fn apply_to_book(book: &mut crate::library::Book, tags: &Tags) {
     if tags.narrator.is_some() {
         book.narrator = tags.narrator.clone();
     }
-    if tags.series.is_some() {
+    // For multi-file we already used `series` as the book title, so don't
+    // also surface it as a series.
+    if !multi_file && tags.series.is_some() {
         book.series = tags.series.clone();
     }
     if tags.series_index.is_some() {
@@ -218,44 +232,86 @@ mod tests {
     }
 
     #[test]
-    fn apply_to_book_overrides_title() {
+    fn apply_single_file_uses_title_tag() {
         let mut book = make_book("DirName");
         let tags = Tags {
             title: Some("The Way of Kings".into()),
             ..Default::default()
         };
-        apply_to_book(&mut book, &tags);
+        apply_to_book(&mut book, &tags, false);
         assert_eq!(book.title, "The Way of Kings");
     }
 
     #[test]
-    fn apply_to_book_keeps_existing_title_for_blank_tag() {
+    fn apply_single_file_keeps_existing_title_for_blank_tag() {
         let mut book = make_book("DirName");
         let tags = Tags {
             title: Some("   ".into()),
             ..Default::default()
         };
-        apply_to_book(&mut book, &tags);
+        apply_to_book(&mut book, &tags, false);
         assert_eq!(book.title, "DirName");
     }
 
     #[test]
-    fn apply_to_book_sets_author_narrator_series() {
+    fn apply_multi_file_ignores_track_title_uses_album_for_book() {
+        // The Backyard Bird Chronicles bug: per-track TIT2 is the chapter
+        // title; the book title belongs in TALB. For multi-file books we
+        // must NOT use the per-track title.
+        let mut book = make_book("The Backyard Bird Chronicles");
+        let tags = Tags {
+            // Track 001 says it's "Introduction" — that's the chapter.
+            title: Some("Introduction".into()),
+            // Album is the book.
+            series: Some("The Backyard Bird Chronicles".into()),
+            ..Default::default()
+        };
+        apply_to_book(&mut book, &tags, true);
+        assert_eq!(book.title, "The Backyard Bird Chronicles");
+        // And we shouldn't ALSO surface the album as a series — it was
+        // being used as the book title.
+        assert_eq!(book.series, None);
+    }
+
+    #[test]
+    fn apply_multi_file_falls_back_to_dir_name_when_no_album() {
+        let mut book = make_book("DirName");
+        let tags = Tags {
+            title: Some("Chapter 1".into()),
+            ..Default::default()
+        };
+        apply_to_book(&mut book, &tags, true);
+        assert_eq!(book.title, "DirName");
+    }
+
+    #[test]
+    fn apply_to_book_sets_author_narrator() {
         let mut book = make_book("Book");
         let tags = Tags {
             author: Some("Brandon Sanderson".into()),
             narrator: Some("Michael Kramer".into()),
-            series: Some("The Stormlight Archive".into()),
-            series_index: Some(1),
             year: Some(2010),
             ..Default::default()
         };
-        apply_to_book(&mut book, &tags);
+        apply_to_book(&mut book, &tags, false);
         assert_eq!(book.author.as_deref(), Some("Brandon Sanderson"));
         assert_eq!(book.narrator.as_deref(), Some("Michael Kramer"));
+        assert_eq!(book.year, Some(2010));
+    }
+
+    #[test]
+    fn apply_single_file_surfaces_series() {
+        // For a single-file m4b, album is the actual series — keep it.
+        let mut book = make_book("Way of Kings");
+        let tags = Tags {
+            title: Some("The Way of Kings".into()),
+            series: Some("The Stormlight Archive".into()),
+            series_index: Some(1),
+            ..Default::default()
+        };
+        apply_to_book(&mut book, &tags, false);
         assert_eq!(book.series.as_deref(), Some("The Stormlight Archive"));
         assert_eq!(book.series_index, Some(1));
-        assert_eq!(book.year, Some(2010));
     }
 
     #[test]
@@ -263,7 +319,7 @@ mod tests {
         let mut book = make_book("Book");
         book.author = Some("Existing".into());
         let tags = Tags::default();
-        apply_to_book(&mut book, &tags);
+        apply_to_book(&mut book, &tags, false);
         assert_eq!(book.author.as_deref(), Some("Existing"));
     }
 
