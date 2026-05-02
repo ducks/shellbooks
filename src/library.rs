@@ -166,6 +166,11 @@ impl Library {
             }
         }
 
+        // Build chapter list. Single-file m4b: parse chpl atoms; if none,
+        // synthesize a single chapter spanning the whole file. Multi-file:
+        // one chapter per file, title = cleaned filename.
+        populate_chapters(&mut book);
+
         self.books.push(book);
         self.books.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         let new_idx = self
@@ -253,6 +258,55 @@ fn collect_books_under(root: &Path, out: &mut Vec<Book>) {
         files.sort();
         let book = build_book(&parent, files);
         out.push(book);
+    }
+}
+
+/// Set book.chapters and book.total_duration based on the BookKind.
+/// Single-file m4b: read chpl chapter list, fall back to a single
+/// whole-file chapter when none exist. Multi-file: synthesize one
+/// chapter per file using each file's reported duration.
+fn populate_chapters(book: &mut Book) {
+    match &book.kind {
+        BookKind::SingleFile { path } => {
+            let file_duration = crate::metadata::read(path)
+                .ok()
+                .and_then(|t| t.duration)
+                .unwrap_or(Duration::ZERO);
+            book.total_duration = file_duration;
+
+            let chapters = crate::chapters::read_m4b(path).unwrap_or_default();
+            book.chapters = if chapters.is_empty() {
+                vec![Chapter {
+                    title: book.title.clone(),
+                    file_index: 0,
+                    start: Duration::ZERO,
+                    duration: file_duration,
+                }]
+            } else {
+                chapters
+            };
+        }
+        BookKind::MultiFile { files } => {
+            let mut total = Duration::ZERO;
+            let entries: Vec<(String, Duration)> = files
+                .iter()
+                .map(|p| {
+                    let dur = crate::metadata::read(p)
+                        .ok()
+                        .and_then(|t| t.duration)
+                        .unwrap_or(Duration::ZERO);
+                    total += dur;
+                    let name = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    (name, dur)
+                })
+                .collect();
+            book.total_duration = total;
+            book.chapters = crate::chapters::synthesize_multi_file(&entries);
+        }
     }
 }
 

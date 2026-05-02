@@ -38,24 +38,35 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_tabs(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    // Order matches the digit shortcuts: 1=library, 2=book, 3=now,
+    // 4=bookmarks, 5=browser. Render each as "1 library" so users
+    // can see the binding without checking the help bar.
     let tabs = [
-        ("library", View::Library),
-        ("browser", View::Browser),
-        ("book", View::BookDetail),
-        ("now playing", View::NowPlaying),
-        ("bookmarks", View::Bookmarks),
+        ('1', "library", View::Library),
+        ('2', "book", View::BookDetail),
+        ('3', "now playing", View::NowPlaying),
+        ('4', "bookmarks", View::Bookmarks),
+        ('5', "browser", View::Browser),
     ];
     let mut spans = vec![];
-    for (i, (label, view)) in tabs.iter().enumerate() {
+    for (i, (digit, label, view)) in tabs.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw("  "));
         }
-        let style = if app.view == *view {
+        let active = app.view == *view;
+        let digit_style = if active {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let label_style = if active {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        spans.push(Span::styled(*label, style));
+        spans.push(Span::styled(digit.to_string(), digit_style));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(*label, label_style));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -69,9 +80,11 @@ fn draw_status(f: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     };
 
     let help = match app.view {
-        View::Library => "q quit · a add · j/k move · tab view",
-        View::Browser => "q quit · enter open/import · h up · esc back · tab view",
-        _ => "q quit · space play/pause · +/- speed · tab view",
+        View::Library => "1-5 jump · enter play · a add · j/k move · q quit",
+        View::Browser => "1-5 jump · a import · enter descend · h up · esc back · q quit",
+        View::NowPlaying | View::BookDetail | View::Bookmarks => {
+            "1-5 jump · space play/pause · ,/. ±10s · +/- speed · q quit"
+        }
     };
 
     let mut spans = vec![
