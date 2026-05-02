@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::audio::Player;
 use crate::browser::BrowserState;
 use crate::config::Config;
-use crate::library::Library;
+use crate::library::{BookKind, Library};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -58,6 +58,36 @@ impl App {
             && let Err(err) = self.library.save(&db_path)
         {
             log::warn!("library save failed: {err}");
+        }
+    }
+
+    /// Start playing the currently-selected library book from its saved
+    /// progress. Quietly does nothing if no books are loaded.
+    fn play_selected(&mut self) {
+        let Some(book) = self.library.books.get(self.selected_book) else {
+            return;
+        };
+        let queue: Vec<std::path::PathBuf> = match &book.kind {
+            BookKind::SingleFile { path } => vec![path.clone()],
+            BookKind::MultiFile { files } => files.clone(),
+        };
+
+        let resume_chapter = book.progress.current_chapter;
+        let resume_offset = book.progress.position;
+        let queue_index = book
+            .chapters
+            .get(resume_chapter)
+            .map(|c| c.file_index)
+            .unwrap_or(0);
+
+        match self.player.play(queue, queue_index, resume_offset) {
+            Ok(()) => {
+                self.view = View::NowPlaying;
+                self.status = Some(format!("playing: {}", book.title));
+            }
+            Err(err) => {
+                self.status = Some(format!("playback failed: {err}"));
+            }
         }
     }
 
@@ -108,9 +138,8 @@ impl App {
         term: &mut Terminal<B>,
     ) -> Result<()> {
         loop {
+            self.player.tick();
             term.draw(|f| crate::ui::draw(f, self))?;
-            // (`draw` borrows self mutably for ListState; the closure
-            // is `FnOnce` so this is fine.)
 
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
@@ -122,10 +151,29 @@ impl App {
             }
 
             if self.should_quit {
+                self.persist_progress();
                 break;
             }
         }
         Ok(())
+    }
+
+    /// Save the current player position back to the active book and
+    /// flush library.json. Called on quit and could be called periodically
+    /// in a future revision.
+    fn persist_progress(&mut self) {
+        if self.player.queue.is_empty() {
+            return;
+        }
+        if let Some(book) = self.library.books.get_mut(self.selected_book) {
+            book.progress.position = self.player.position;
+            book.progress.current_chapter = book
+                .chapters
+                .iter()
+                .position(|c| c.file_index == self.player.queue_index)
+                .unwrap_or(0);
+        }
+        self.save_library();
     }
 
     fn handle_key(&mut self, code: KeyCode) {
@@ -133,26 +181,54 @@ impl App {
         self.status = None;
 
         match code {
+            // ---- Global ----
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char(' ') => self.player.toggle_pause(),
+
+            // Direct screen jumps (cmus-style, like shelltrax).
+            KeyCode::Char('1') => self.view = View::Library,
+            KeyCode::Char('2') => self.view = View::BookDetail,
+            KeyCode::Char('3') => self.view = View::NowPlaying,
+            KeyCode::Char('4') => self.view = View::Bookmarks,
+            KeyCode::Char('5') => self.view = View::Browser,
+
+            // Tab still cycles for users who prefer it.
+            KeyCode::Tab => {
+                self.view = match self.view {
+                    View::Library => View::BookDetail,
+                    View::BookDetail => View::NowPlaying,
+                    View::NowPlaying => View::Bookmarks,
+                    View::Bookmarks => View::Browser,
+                    View::Browser => View::Library,
+                };
+            }
+
+            // Playback controls work regardless of view.
+            KeyCode::Char(' ') | KeyCode::Char('c') => self.player.toggle_pause(),
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.player.set_speed(self.player.speed + 0.05);
             }
             KeyCode::Char('-') => {
                 self.player.set_speed(self.player.speed - 0.05);
             }
-            KeyCode::Tab => {
-                self.view = match self.view {
-                    View::Library => View::Browser,
-                    View::Browser => View::BookDetail,
-                    View::BookDetail => View::NowPlaying,
-                    View::NowPlaying => View::Bookmarks,
-                    View::Bookmarks => View::Library,
-                };
+            KeyCode::Char(',') if self.view != View::Browser => {
+                let _ = self.player.seek(Duration::from_secs(10), false);
             }
-            // Library keybinds
+            KeyCode::Char('.') if self.view != View::Browser => {
+                let _ = self.player.seek(Duration::from_secs(10), true);
+            }
+            KeyCode::Char('[') if self.view != View::Browser => {
+                let _ = self.player.seek(Duration::from_secs(60), false);
+            }
+            KeyCode::Char(']') if self.view != View::Browser => {
+                let _ = self.player.seek(Duration::from_secs(60), true);
+            }
+
+            // ---- Library ----
             KeyCode::Char('a') if self.view == View::Library => {
                 self.view = View::Browser;
+            }
+            KeyCode::Enter if self.view == View::Library => {
+                self.play_selected();
             }
             KeyCode::Char('j') | KeyCode::Down if self.view == View::Library => {
                 if !self.library.books.is_empty()
@@ -166,7 +242,8 @@ impl App {
                     self.selected_book -= 1;
                 }
             }
-            // Browser keybinds
+
+            // ---- Browser ----
             KeyCode::Char('j') | KeyCode::Down if self.view == View::Browser => {
                 self.browser.move_down();
             }
@@ -175,13 +252,23 @@ impl App {
             }
             KeyCode::Char('g') if self.view == View::Browser => self.browser.go_to_top(),
             KeyCode::Char('G') if self.view == View::Browser => self.browser.go_to_bottom(),
-            KeyCode::Char('h') | KeyCode::Left if self.view == View::Browser => {
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace
+                if self.view == View::Browser =>
+            {
                 self.browser.go_up();
             }
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right
                 if self.view == View::Browser =>
             {
-                if let Some(path) = self.browser.open_selected() {
+                // Enter only descends (or returns an audio file path —
+                // future use). Never imports. Matches shelltrax.
+                let _ = self.browser.open_selected();
+            }
+            // shelltrax-style import: `a` adds the highlighted path to
+            // the library. Works on any directory of audio or a single
+            // audio file.
+            KeyCode::Char('a') if self.view == View::Browser => {
+                if let Some(path) = self.browser.selected_path() {
                     self.import_from_browser(path);
                 }
             }

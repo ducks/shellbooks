@@ -29,11 +29,10 @@ impl BrowserState {
         }
     }
 
-    /// Descend into the selected directory or surface it for import.
-    /// Returns `Some(path)` when the selection is something the caller
-    /// should consider importing — a directory containing audio files,
-    /// or a single audio file. `None` means we either went up or
-    /// descended into a directory of subdirectories.
+    /// Descend into the selected directory, or — for an audio file —
+    /// surface its path so the caller can play it inline. This never
+    /// imports; importing is a separate explicit action via the `a`
+    /// keybind, mirroring shelltrax.
     pub fn open_selected(&mut self) -> Option<PathBuf> {
         match self.list.selected_item().cloned() {
             Some(BrowserItem::UpDirectory) => {
@@ -41,16 +40,20 @@ impl BrowserState {
                 None
             }
             Some(BrowserItem::Entry(path)) if path.is_dir() => {
-                if dir_contains_audio(&path) {
-                    // Bottom-of-tree directory the user is asking us to
-                    // treat as a book. Caller decides what to do with it.
-                    return Some(path);
-                }
                 self.current_dir = path.clone();
                 self.list.set_entries(read_dir_items(&self.current_dir));
                 None
             }
             Some(BrowserItem::Entry(path)) if is_audio_file(&path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Returns the currently-selected path (without descending). Used
+    /// by the `a` import action.
+    pub fn selected_path(&self) -> Option<PathBuf> {
+        match self.list.selected_item() {
+            Some(BrowserItem::Entry(p)) => Some(p.clone()),
             _ => None,
         }
     }
@@ -196,7 +199,9 @@ mod tests {
     }
 
     #[test]
-    fn open_selected_returns_path_for_directory_with_audio() {
+    fn open_selected_descends_into_directory_with_audio() {
+        // Per shelltrax convention, Enter only descends — it never
+        // imports. Importing is a separate `a` action via selected_path().
         let dir = TempDir::new().unwrap();
         let book = dir.path().join("Book");
         std::fs::create_dir(&book).unwrap();
@@ -208,9 +213,33 @@ mod tests {
         };
         state.move_down();
         let result = state.open_selected();
-        assert_eq!(result.as_deref(), Some(book.as_path()));
-        // Importantly we did NOT descend.
-        assert_eq!(state.current_dir, dir.path());
+        assert!(result.is_none(), "open_selected should not return a path for a directory");
+        assert_eq!(state.current_dir, book);
+    }
+
+    #[test]
+    fn selected_path_returns_highlighted_directory() {
+        let dir = TempDir::new().unwrap();
+        let book = dir.path().join("Book");
+        std::fs::create_dir(&book).unwrap();
+
+        let mut state = BrowserState {
+            current_dir: dir.path().to_path_buf(),
+            list: ListSelector::new(read_dir_items(dir.path())),
+        };
+        state.move_down();
+        assert_eq!(state.selected_path().as_deref(), Some(book.as_path()));
+    }
+
+    #[test]
+    fn selected_path_returns_none_on_up_directory() {
+        let dir = TempDir::new().unwrap();
+        let state = BrowserState {
+            current_dir: dir.path().to_path_buf(),
+            list: ListSelector::new(read_dir_items(dir.path())),
+        };
+        // First entry is UpDirectory.
+        assert!(state.selected_path().is_none());
     }
 
     #[test]
