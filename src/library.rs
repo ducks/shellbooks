@@ -734,6 +734,64 @@ mod tests {
         assert_eq!(lib.books[0].title, "Second");
     }
 
+    // ---- current_chapter_index dispatch ----
+
+    #[test]
+    fn current_chapter_index_uses_queue_index_for_multi_file() {
+        let mut book = make_book("id", "Multi", "/tmp/m");
+        book.kind = BookKind::MultiFile {
+            files: vec![PathBuf::from("/tmp/01.mp3"), PathBuf::from("/tmp/02.mp3")],
+        };
+        book.chapters = vec![
+            Chapter {
+                title: "Ch1".into(),
+                file_index: 0,
+                start: Duration::ZERO,
+                duration: Duration::from_secs(100),
+            },
+            Chapter {
+                title: "Ch2".into(),
+                file_index: 1,
+                start: Duration::ZERO,
+                duration: Duration::from_secs(100),
+            },
+        ];
+        // Position is irrelevant for multi-file dispatch.
+        assert_eq!(crate::app::current_chapter_index(&book, 0, Duration::from_secs(50)), 0);
+        assert_eq!(crate::app::current_chapter_index(&book, 1, Duration::from_secs(0)), 1);
+    }
+
+    #[test]
+    fn current_chapter_index_walks_starts_for_single_file() {
+        let mut book = make_book("id", "Single", "/tmp/s");
+        book.kind = BookKind::SingleFile { path: PathBuf::from("/tmp/s/book.m4b") };
+        book.chapters = vec![
+            Chapter {
+                title: "Intro".into(),
+                file_index: 0,
+                start: Duration::ZERO,
+                duration: Duration::from_secs(60),
+            },
+            Chapter {
+                title: "Ch1".into(),
+                file_index: 0,
+                start: Duration::from_secs(60),
+                duration: Duration::from_secs(120),
+            },
+            Chapter {
+                title: "Ch2".into(),
+                file_index: 0,
+                start: Duration::from_secs(180),
+                duration: Duration::from_secs(120),
+            },
+        ];
+        assert_eq!(crate::app::current_chapter_index(&book, 0, Duration::from_secs(0)), 0);
+        assert_eq!(crate::app::current_chapter_index(&book, 0, Duration::from_secs(59)), 0);
+        assert_eq!(crate::app::current_chapter_index(&book, 0, Duration::from_secs(60)), 1);
+        assert_eq!(crate::app::current_chapter_index(&book, 0, Duration::from_secs(180)), 2);
+        assert_eq!(crate::app::current_chapter_index(&book, 0, Duration::from_secs(250)), 2);
+    }
+
     #[test]
     fn delete_at_returns_none_for_out_of_bounds() {
         let mut lib = Library::default();

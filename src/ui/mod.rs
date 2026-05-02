@@ -136,7 +136,7 @@ fn draw_playback_footer(f: &mut Frame, area: Rect, app: &App) {
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let help = match app.view {
         View::Library => {
-            "1-3 jump · tab focus · enter play · a add · d delete · i info · q quit"
+            "1-3 jump · tab focus · enter play · b/z chapter · a add · d delete · i info · q quit"
         }
         View::Browser => "1-3 jump · a import · enter descend · h up · esc back · q quit",
         View::Bookmarks => "1-3 jump · enter jump · i info · q quit",
