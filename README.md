@@ -34,6 +34,14 @@ doesn't), pitch-preserving speed, theme support, and a sleep timer.
 
 ## Installation
 
+From [crates.io](https://crates.io/crates/shellbooks):
+
+```bash
+cargo install shellbooks
+```
+
+Or from source:
+
 ```bash
 git clone git@github.com:ducks/shellbooks.git
 cd shellbooks
