@@ -1848,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "shellbooks"
-version = "20260429.0.0"
+version = "20260503.0.0"
 dependencies = [
  "anyhow",
  "crossterm 0.29.0",
