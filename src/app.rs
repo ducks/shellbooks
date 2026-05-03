@@ -6,12 +6,36 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(10);
 
 use crate::audio::Player;
 use crate::browser::BrowserState;
 use crate::config::Config;
-use crate::library::{BookKind, Library};
+use crate::library::{Book, BookKind, Library};
+
+/// Find the chapter index a position belongs to. For multi-file books
+/// chapters are 1:1 with files, so queue_index is authoritative. For
+/// single-file books all chapters live in file 0 and we walk by start.
+pub(crate) fn current_chapter_index(book: &Book, queue_index: usize, position: Duration) -> usize {
+    if matches!(book.kind, BookKind::MultiFile { .. }) {
+        return book
+            .chapters
+            .iter()
+            .position(|c| c.file_index == queue_index)
+            .unwrap_or(0);
+    }
+    let mut idx = 0;
+    for (i, c) in book.chapters.iter().enumerate() {
+        if position >= c.start {
+            idx = i;
+        } else {
+            break;
+        }
+    }
+    idx
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -40,6 +64,14 @@ pub struct App {
     pub show_info: bool,
     pub should_quit: bool,
     pub status: Option<String>,
+
+    /// ID of the book whose files are currently in the player queue.
+    /// `None` when the player is idle. Lets b/z chapter-skip and the
+    /// autosave loop know which library entry to update without relying
+    /// on selected_book (which can drift as the user navigates).
+    pub playing_book_id: Option<String>,
+    /// Last time we persisted progress to disk during playback.
+    pub last_autosave: Instant,
 }
 
 impl App {
@@ -58,6 +90,8 @@ impl App {
             show_info: false,
             should_quit: false,
             status: None,
+            playing_book_id: None,
+            last_autosave: Instant::now(),
         })
     }
 
@@ -90,9 +124,13 @@ impl App {
             .map(|c| c.file_index)
             .unwrap_or(0);
 
+        let book_id = book.id.clone();
+        let book_title = book.title.clone();
         match self.player.play(queue, queue_index, resume_offset) {
             Ok(()) => {
-                self.status = Some(format!("playing: {}", book.title));
+                self.playing_book_id = Some(book_id);
+                self.last_autosave = Instant::now();
+                self.status = Some(format!("playing: {}", book_title));
             }
             Err(err) => {
                 self.status = Some(format!("playback failed: {err}"));
@@ -112,13 +150,67 @@ impl App {
             BookKind::SingleFile { path } => vec![path.clone()],
             BookKind::MultiFile { files } => files.clone(),
         };
-        match self.player.play(queue, chapter.file_index, chapter.start) {
+        let book_id = book.id.clone();
+        let book_title = book.title.clone();
+        let chapter_title = chapter.title.clone();
+        let queue_index = chapter.file_index;
+        let start = chapter.start;
+        match self.player.play(queue, queue_index, start) {
             Ok(()) => {
-                self.status = Some(format!("playing: {} — {}", book.title, chapter.title));
+                self.playing_book_id = Some(book_id);
+                self.last_autosave = Instant::now();
+                self.status = Some(format!("playing: {} — {}", book_title, chapter_title));
             }
             Err(err) => {
                 self.status = Some(format!("playback failed: {err}"));
             }
+        }
+    }
+
+    /// Skip forward (`forward = true`) or backward to the adjacent chapter
+    /// of the *playing* book.
+    fn skip_chapter(&mut self, forward: bool) {
+        let Some(book_id) = self.playing_book_id.clone() else {
+            return;
+        };
+        let Some(book) = self.library.books.iter().find(|b| b.id == book_id) else {
+            return;
+        };
+        if book.chapters.is_empty() {
+            return;
+        }
+
+        // Locate the current chapter by current player position. For
+        // multi-file books, queue_index identifies the file; for
+        // single-file books all chapters share file_index 0 and we
+        // disambiguate by the player's current position.
+        let current = current_chapter_index(book, self.player.queue_index, self.player.position);
+
+        let next = if forward {
+            current + 1
+        } else if current == 0 {
+            0
+        } else {
+            current - 1
+        };
+
+        let Some(chapter) = book.chapters.get(next) else {
+            return;
+        };
+        let queue: Vec<std::path::PathBuf> = match &book.kind {
+            BookKind::SingleFile { path } => vec![path.clone()],
+            BookKind::MultiFile { files } => files.clone(),
+        };
+        let queue_index = chapter.file_index;
+        let start = chapter.start;
+        let title = chapter.title.clone();
+        if let Err(err) = self.player.play(queue, queue_index, start) {
+            self.status = Some(format!("seek failed: {err}"));
+        } else {
+            self.status = Some(format!("chapter: {title}"));
+            // Force a save now — chapter changes are a meaningful checkpoint.
+            self.persist_progress();
+            self.last_autosave = Instant::now();
         }
     }
 
@@ -146,6 +238,7 @@ impl App {
             .any(|q| removed_paths.iter().any(|p| *p == q.as_path()))
         {
             self.player.stop();
+            self.playing_book_id = None;
         }
 
         // Keep selected_book valid.
@@ -205,6 +298,7 @@ impl App {
     ) -> Result<()> {
         loop {
             self.player.tick();
+            self.maybe_autosave();
             term.draw(|f| crate::ui::draw(f, self))?;
 
             if event::poll(Duration::from_millis(100))? {
@@ -224,20 +318,35 @@ impl App {
         Ok(())
     }
 
-    /// Save the current player position back to the active book and
-    /// flush library.json. Called on quit and could be called periodically
-    /// in a future revision.
+    /// Persist progress every AUTOSAVE_INTERVAL while playing, so a
+    /// crash never costs more than ~10 seconds of position data.
+    fn maybe_autosave(&mut self) {
+        if !matches!(self.player.state, crate::audio::PlayerState::Playing) {
+            return;
+        }
+        if self.last_autosave.elapsed() < AUTOSAVE_INTERVAL {
+            return;
+        }
+        self.persist_progress();
+        self.last_autosave = Instant::now();
+    }
+
+    /// Save the current player position back to whichever book is actively
+    /// playing (tracked by playing_book_id, not selected_book — the user
+    /// may have navigated to a different library entry mid-playback).
+    /// Called on quit and on the 10s autosave tick.
     fn persist_progress(&mut self) {
         if self.player.queue.is_empty() {
             return;
         }
-        if let Some(book) = self.library.books.get_mut(self.selected_book) {
-            book.progress.position = self.player.position;
-            book.progress.current_chapter = book
-                .chapters
-                .iter()
-                .position(|c| c.file_index == self.player.queue_index)
-                .unwrap_or(0);
+        let Some(book_id) = self.playing_book_id.clone() else {
+            return;
+        };
+        let queue_index = self.player.queue_index;
+        let position = self.player.position;
+        if let Some(book) = self.library.books.iter_mut().find(|b| b.id == book_id) {
+            book.progress.position = position;
+            book.progress.current_chapter = current_chapter_index(book, queue_index, position);
         }
         self.save_library();
     }
@@ -287,6 +396,13 @@ impl App {
             }
             KeyCode::Char(']') if self.view != View::Browser => {
                 let _ = self.player.seek(Duration::from_secs(60), true);
+            }
+            // Chapter skip (shelltrax-style: b next, z previous).
+            KeyCode::Char('b') if self.view != View::Browser => {
+                self.skip_chapter(true);
+            }
+            KeyCode::Char('z') if self.view != View::Browser => {
+                self.skip_chapter(false);
             }
 
             // ---- Library ----
